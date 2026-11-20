@@ -71,7 +71,7 @@ it is compromised.
 ## Install
 
 ```bash
-git clone <this repo> podman-panel      # or copy the folder
+git clone https://github.com/vaskivskyiI/podman-panel.git
 cd podman-panel && sudo ./install.sh
 ```
 
