@@ -236,7 +236,7 @@ class Panel:
             # By ID: a pod often contains a container of the same name, and podman resolves a name to the
             # container first, which would produce only container-<name>.service.
             return [(["mkdir", "-p", acc.unit_dir], None),
-                    (["podman", "generate", "systemd", "--new", "--files", "--name", st["id"]], acc.unit_dir),
+                    (["podman", "generate", "systemd", "--new", "--files", "--restart-sec", "10", "--name", st["id"]], acc.unit_dir),
                     (sc("daemon-reload"), None)]
 
         recreate_via_unit = self._recreate_steps(acc, st)
@@ -391,7 +391,7 @@ class Panel:
         kind = "pod" if st["kind"] == "pod" else "container"
         # By ID at run time: the script creates a new pod, and a container may share the pod's name.
         regenerate = ('set -e; id=$(podman %s inspect --format "{{.Id}}" -- "$1"); cd "$2"; '
-                      'podman generate systemd --new --files --name "$id" >/dev/null; echo "regenerated units in $2"'
+                      'podman generate systemd --new --files --restart-sec 10 --name "$id" >/dev/null; echo "regenerated units in $2"'
                       % kind)
         pm = ["podman", "pod"] if kind == "pod" else ["podman"]
         # If the script fails, bring the stack back through its previous unit rather than leaving it down.

@@ -70,7 +70,9 @@ stack_up() {
   local id
   id=$(podman pod inspect --format '{{.Id}}' "$POD")
   mkdir -p "$UNIT_DIR"
-  (cd "$UNIT_DIR" && podman generate systemd --new --files --name "$id" >/dev/null 2>&1)
+  # --restart-sec: a container that starts before its database is ready is retried every 10 s instead of
+  # hitting systemd's limit of 5 quick restarts and staying dead.
+  (cd "$UNIT_DIR" && podman generate systemd --new --files --restart-sec 10 --name "$id" >/dev/null 2>&1)
   stack_remove
   "${SYSTEMCTL[@]}" daemon-reload
   "${SYSTEMCTL[@]}" enable "$UNIT" >/dev/null 2>&1
