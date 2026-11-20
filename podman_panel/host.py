@@ -313,7 +313,9 @@ def snapshot(acc):
 def _stack(kind, name, ident, status, ctrs, unit, scripts, id_by_name):
     members = [c for c in ctrs if not c["infra"]]
     running = sum(c["state"] == "running" for c in members)
-    own = [s for s in scripts if name in s["pods"]]
+    # A script named after the pod wins over leftovers like "seafile copy.sh" or "immich_old.sh".
+    own = sorted((s for s in scripts if name in s["pods"]),
+                 key=lambda s: (os.path.splitext(os.path.basename(s["path"]))[0] != name, s["path"]))
     # Previous images kept by the last update, where they differ from what runs now.
     rollback = sorted({c["image"] for c in members
                        if id_by_name.get(rollback_ref(c["image"])) not in (None, c["image_id"])})
