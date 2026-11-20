@@ -52,8 +52,10 @@ stack_pull() {
 stack_remove() {
   if podman pod exists "$POD"; then
     say "remove pod $POD"
-    podman pod stop --ignore -t 30 "$POD" >/dev/null
-    podman pod rm -f --ignore "$POD" >/dev/null
+    podman pod stop --ignore -t 30 "$POD" >/dev/null || true
+    # podman 4.9 sometimes removes the pod yet exits with "cgroup: Unit … slice not loaded": trust the result.
+    podman pod rm -f --ignore "$POD" >/dev/null 2>&1 || ! podman pod exists "$POD" || {
+      echo "cannot remove pod $POD" >&2; return 1; }
   fi
 }
 

@@ -34,6 +34,14 @@ DEFAULTS = {
 }
 
 
+def rm_step(pm, name):
+    """Remove a pod/container, ignoring a failure if it is gone anyway: podman 4.9 sometimes removes a pod
+    and still exits with "removing pod … cgroup: Unit … slice not loaded"."""
+    exists = ["podman", "pod", "exists"] if pm[-1] == "pod" else ["podman", "container", "exists"]
+    return (["sh", "-c", shlex.join(pm + ["rm", "-f", "--ignore"]) + ' -- "$1" || ! ' + shlex.join(exists) + ' "$1"',
+             "sh", name], None)
+
+
 class ApiError(Exception):
     def __init__(self, msg, code=400):
         super().__init__(msg)
@@ -242,7 +250,7 @@ class Panel:
         elif op == "adopt":
             if not unit_name:
                 raise ApiError("no unit to hand over to")
-            steps = [(pm + ["stop", "--ignore", name], None), (pm + ["rm", "-f", "--ignore", name], None),
+            steps = [(pm + ["stop", "--ignore", name], None), rm_step(pm, name),
                      (sc("start", unit_name), None)]
         elif op == "autostart_on":
             steps = ([] if unit_name else generate()) + [(sc("enable", unit_name or default_unit), None)]
@@ -258,7 +266,7 @@ class Panel:
             if st["running"]:
                 raise ApiError("stop it first")
             steps = ([(sc("disable", unit_name), None)] if unit and unit["file_state"] == "enabled" else []) + \
-                    [(pm + ["rm", "-f", name], None)]
+                    [rm_step(pm, name)]
         elif op == "rollback":
             if not st["rollback"]:
                 raise ApiError("no previous image kept for this stack")
@@ -344,7 +352,7 @@ class Panel:
         sc = acc.systemctl_argv
         if unit["active"] in ("active", "activating", "reloading"):
             return lambda: [(sc("restart", unit["name"]), None)]
-        return lambda: [(pm + ["stop", "--ignore", st["name"]], None), (pm + ["rm", "-f", "--ignore", st["name"]], None),
+        return lambda: [(pm + ["stop", "--ignore", st["name"]], None), rm_step(pm, st["name"]),
                         (sc("start", unit["name"]), None)]
 
     def _update_steps(self, acc, st, body, op, recreate_via_unit):
@@ -394,7 +402,7 @@ class Panel:
         return ([(sc("stop", unit["name"]), None)] + run +
                 [(["mkdir", "-p", acc.unit_dir], None),
                  (["sh", "-c", regenerate, "sh", st["name"], acc.unit_dir], None),
-                 (pm + ["stop", "--ignore", st["name"]], None), (pm + ["rm", "-f", "--ignore", st["name"]], None),
+                 (pm + ["stop", "--ignore", st["name"]], None), rm_step(pm, st["name"]),
                  (sc("daemon-reload"), None), (sc("start", unit["name"]), None)])
 
     @staticmethod
