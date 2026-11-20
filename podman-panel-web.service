@@ -1,6 +1,6 @@
 # The network-facing half: serves the UI and forwards /api/* to the agent's socket.
 # Runs as an unprivileged system user in a tight systemd sandbox; it holds no secrets.
-# install.sh fills in @BIND@ and @PORT@.
+# install.sh fills in @BIND@, @PORT@ and @ALLOW@.
 [Unit]
 Description=Podman Panel web front end
 Requires=podman-panel-agent.service
@@ -39,6 +39,9 @@ LockPersonality=yes
 MemoryDenyWriteExecute=yes
 RemoveIPC=yes
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+# Per-service IP firewall: only the reverse proxy may connect, even when listening on a LAN address.
+IPAddressDeny=any
+IPAddressAllow=@ALLOW@
 SystemCallArchitectures=native
 SystemCallFilter=@system-service
 SystemCallFilter=~@privileged @resources

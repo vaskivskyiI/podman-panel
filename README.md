@@ -137,8 +137,27 @@ panel.home.lan {
 }
 ```
 
-If the proxy runs in a rootless container that cannot reach the host's loopback, listen on another
-address and firewall it: `sudo PANEL_LISTEN=10.0.0.5:9191 ./install.sh`.
+### Proxy running in a container
+
+Inside a container `127.0.0.1` is the container itself, so nginx gets `502 Bad Gateway`. Let the panel
+listen on the server's LAN address and point the proxy there (`proxy_pass http://192.168.1.10:9191;`):
+
+```bash
+sudo PANEL_LISTEN=192.168.1.10:9191 ./install.sh
+```
+
+The port is then open on the LAN, but systemd's per-service firewall (`IPAddressAllow`) drops every
+connection except from the addresses in `allow_from`. The default is loopback plus the listen address
+itself, which is where a **rootless** nginx container (slirp4netns) on the same host connects from.
+For a **rootful** nginx container on a podman bridge network, also allow that network:
+
+```bash
+sudo PANEL_ALLOW="localhost 192.168.1.10 10.88.0.0/16" ./install.sh
+```
+
+If the proxy times out (`504`), its address is not allowed. Check what it connects from with
+`podman inspect <nginx> --format '{{.NetworkSettings.Networks}}'`, or briefly use `PANEL_ALLOW=any`
+and read the client address in `journalctl -u podman-panel-web`.
 
 For self-update, the git remote must be readable by root without your SSH key (an `https://` URL).
 
@@ -151,6 +170,7 @@ For self-update, the git remote must be readable by root without your SSH key (a
 | `allowed_hosts` | asked | host names the panel is reached by |
 | `users` | root + all lingering users | accounts to manage |
 | `listen` | `127.0.0.1:9191` | address of the web service (rerun `install.sh` after changing) |
+| `allow_from` | `localhost` + listen address | addresses allowed to connect (rerun `install.sh`) |
 
 ```bash
 cd /opt/podman-panel
