@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Podman Panel</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Crect x='1' y='3' width='14' height='10' rx='2' fill='%23892ca0'/%3E%3C/svg%3E">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="login" class="login hidden">
+  <form id="login-form" class="login-card">
+    <h1>Podman Panel</h1>
+    <label for="pw">Password</label>
+    <input id="pw" type="password" autocomplete="current-password" required autofocus>
+    <label for="code">Authenticator code</label>
+    <input id="code" inputmode="numeric" autocomplete="one-time-code" maxlength="7" required>
+    <button class="btn primary" type="submit">Sign in</button>
+    <p id="login-err" class="err" role="alert"></p>
+  </form>
+</div>
+
+<div id="app" class="hidden">
+  <header class="top">
+    <div class="brand"><span class="logo"></span><span id="hostname">Podman Panel</span></div>
+    <div id="meters" class="meters"></div>
+    <div class="top-actions">
+      <button id="btn-updates" class="btn">Check updates</button>
+      <button id="btn-refresh" class="btn" title="Refresh now">Refresh</button>
+      <button id="btn-logout" class="btn ghost">Sign out</button>
+    </div>
+  </header>
+  <nav class="tabs" role="tablist">
+    <button data-tab="overview" class="active">Overview</button>
+    <button data-tab="stacks">Stacks</button>
+    <button data-tab="updates">Updates <span id="badge-updates" class="count hidden"></span></button>
+    <button data-tab="insights">Insights <span id="badge-insights" class="count hidden"></span></button>
+    <button data-tab="images">Images</button>
+    <button data-tab="jobs">Jobs <span id="badge-jobs" class="count hidden"></span></button>
+  </nav>
+  <main id="view"></main>
+</div>
+
+<dialog id="modal">
+  <div class="modal-head"><h2 id="modal-title"></h2><button class="btn ghost" id="modal-close" aria-label="Close">✕</button></div>
+  <div id="modal-body"></div>
+</dialog>
+<div id="toast" class="toast hidden" role="status"></div>
+<script src="app.js"></script>
+</body>
+</html>

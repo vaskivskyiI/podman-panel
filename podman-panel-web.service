@@ -1,0 +1,51 @@
+# The network-facing half: serves the UI and forwards /api/* to the agent's socket.
+# Runs as an unprivileged system user in a tight systemd sandbox; it holds no secrets.
+# install.sh fills in @BIND@ and @PORT@.
+[Unit]
+Description=Podman Panel web front end
+Requires=podman-panel-agent.service
+After=podman-panel-agent.service
+
+[Service]
+User=podman-panel
+Group=podman-panel
+WorkingDirectory=/opt/podman-panel
+Environment=PANEL_BIND=@BIND@ PANEL_PORT=@PORT@ PYTHONDONTWRITEBYTECODE=1
+ExecStart=/usr/bin/python3 -m podman_panel web
+Restart=on-failure
+RestartSec=3
+
+# Sandbox
+NoNewPrivileges=yes
+CapabilityBoundingSet=
+AmbientCapabilities=
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+PrivateIPC=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectProc=invisible
+ProcSubset=pid
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+InaccessiblePaths=-/etc/podman-panel -/var/log/podman-panel
+UMask=0077
+MemoryMax=256M
+TasksMax=64
+
+[Install]
+WantedBy=multi-user.target

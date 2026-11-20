@@ -1,0 +1,15 @@
+[Unit]
+Description=Podman Panel agent (podman and systemd access for the web front end)
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+WorkingDirectory=/opt/podman-panel
+ExecStart=/usr/bin/python3 -m podman_panel agent --config /etc/podman-panel/config.json
+RuntimeDirectory=podman-panel
+UMask=0077
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
