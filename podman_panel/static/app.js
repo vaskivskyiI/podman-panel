@@ -227,7 +227,9 @@ function stackCard(st) {
 }
 
 function updatesView() {
-  let html = `<div class="toolbar"><span class="muted">Registry digests are compared with the local image; custom images are compared with their git checkout. Last check: ${esc(ago(S.update_state.finished))}${S.update_state.running ? " (running…)" : ""}.</span></div>`;
+  const n = new Set(S.insights.filter((i) => i.severity === "update" && i.action).map((i) => i.account + i.stack)).size;
+  let html = `<div class="toolbar"><span class="muted">Registry digests are compared with the local image; custom images are compared with their git checkout. Last check: ${esc(ago(S.update_state.finished))}${S.update_state.running ? " (running…)" : ""}.</span>
+    <span class="spacer"></span><button class="btn primary" data-act="update-all" ${n ? "" : "disabled"}>Update all (${n})</button></div>`;
   if (!Object.keys(S.updates).length) return html + `<div class="empty">No check has finished yet. Use “Check updates”.</div>`;
   const order = { outdated: 0, unknown: 1, current: 2, pinned: 3, custom: 4 };
   for (const a of S.accounts) {
@@ -379,6 +381,16 @@ document.addEventListener("click", async (e) => {
     case "cancel-job": api(`jobs/${d.job}/cancel`, {}).catch((err) => toast(err.message, true)); break;
     case "logs": showLogs(d.account, d.container); break;
     case "audit": showAudit(); break;
+    case "update-all": {
+      if (!confirm("Update every stack with an available update? They run one after another per account, each recreated with short downtime. Previous images are kept for rollback.")) break;
+      try {
+        const r = await api("action", { op: "update_all" });
+        toast(`Queued ${r.jobs.length} updates` + (r.skipped.length ? `, skipped ${r.skipped.length}` : ""), !!r.skipped.length);
+        if (r.skipped.length) modal("Skipped", `<pre class="out">${esc(r.skipped.join("\n"))}</pre>`);
+        tab = "jobs"; localSet("tab", tab); refresh(true);
+      } catch (err) { toast(err.message, true); }
+      break;
+    }
     case "logout-all":
       if (confirm("Sign out every session, including this one?")) { await api("logout-all", {}).catch(() => {}); showLogin(); }
       break;

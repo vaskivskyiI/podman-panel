@@ -10,7 +10,7 @@ _ids = itertools.count(1)
 
 
 class Job:
-    def __init__(self, title, account, target, steps, on_done=None):
+    def __init__(self, title, account, target, steps, on_done=None, serial=None):
         self.id = next(_ids)
         self.title, self.account, self.target = title, account, target
         self.steps = steps  # list of (argv, cwd or None)
@@ -20,6 +20,7 @@ class Job:
         self.ended = None
         self.proc = None
         self.on_done = on_done
+        self.serial = serial  # a lock shared by jobs that must run one after another
         self.lock = threading.Lock()
 
     def write(self, text):
@@ -29,6 +30,16 @@ class Job:
                 self.output = "…(truncated)…\n" + self.output[-MAX_OUTPUT // 2:]
 
     def run(self, acc):
+        if self.serial:
+            with self.serial:
+                if self.status != "cancelled":
+                    self._run(acc)
+                else:
+                    self.ended = time.time()
+            return
+        self._run(acc)
+
+    def _run(self, acc):
         self.status = "running"
         try:
             for argv, cwd in self.steps:
@@ -55,6 +66,8 @@ class Job:
                 self.on_done(self)
 
     def cancel(self):
+        if self.status not in ("queued", "running"):
+            return
         self.status = "cancelled"
         p = self.proc
         if p:
@@ -73,16 +86,18 @@ class JobManager:
         self.jobs = {}
         self.keep = keep
         self.lock = threading.Lock()
+        self.serial = {}  # account -> lock for queued batches (update all)
 
     def busy(self, account, target):
         return any(j.account == account and j.target == target and j.status in ("queued", "running")
                    for j in self.jobs.values())
 
-    def start(self, acc, title, target, steps, on_done=None):
+    def start(self, acc, title, target, steps, on_done=None, queued=False):
         with self.lock:
             if self.busy(acc.name, target):
                 raise ValueError(f"a job for {target} is already running")
-            job = Job(title, acc.name, target, steps, on_done)
+            serial = self.serial.setdefault(acc.name, threading.Lock()) if queued else None
+            job = Job(title, acc.name, target, steps, on_done, serial)
             self.jobs[job.id] = job
             for old in sorted(self.jobs)[:-self.keep]:
                 if self.jobs[old].status not in ("queued", "running"):

@@ -173,6 +173,8 @@ class Panel:
         if not isinstance(body, dict):
             raise ApiError("bad request")
         op = body.get("op")
+        if op == "update_all":
+            return self._update_all(body, client)
         if op == "self_update":
             me = host.Account(pwd.getpwuid(os.geteuid()).pw_name)
             result = self._job(me, "panel: update", "panel", self._self_update_steps())
@@ -226,11 +228,7 @@ class Panel:
                     (["podman", "generate", "systemd", "--new", "--files", "--name", st["id"]], acc.unit_dir),
                     (sc("daemon-reload"), None)]
 
-        def recreate_via_unit():
-            if unit_active:
-                return [(sc("restart", unit_name), None)]
-            return [(pm + ["stop", "--ignore", name], None), (pm + ["rm", "-f", "--ignore", name], None),
-                    (sc("start", unit_name), None)]
+        recreate_via_unit = self._recreate_steps(acc, st)
 
         if op == "start":
             steps = [(sc("start", unit_name), None)] if unit_name else [(pm + ["start", name], None)]
@@ -270,6 +268,45 @@ class Panel:
         else:
             raise ApiError("unknown op")
         return self._job(acc, title, key, steps)
+
+    def _update_all(self, body, client):
+        """Every stack the last update check found outdated, queued one at a time per account
+        (builds and pulls in parallel would fight over disk and CPU). Each stack is its own job, so
+        one failure does not stop the rest."""
+        only = body.get("account")
+        if only is not None:
+            self.account(only)
+        snaps = self.snapshots(force=True)
+        wanted = {(i["account"], i["stack"]) for i in insights.build(host.host_info(), snaps, self.updates, self.is_root)
+                  if i["severity"] == "update" and i["action"] and (only is None or i["account"] == only)}
+        jobs, skipped = [], []
+        for account, key in sorted(wanted):
+            acc = self.accounts[account]
+            st = next((s for s in next(s for s in snaps if s["account"] == account)["stacks"] if s["key"] == key), None)
+            if not st:
+                continue
+            try:
+                steps = self._update_steps(acc, st, {}, "update", self._recreate_steps(acc, st))
+                job = self.jobs.start(acc, f"{account}/{st['name']}: update", key, steps,
+                                      on_done=self.invalidate, queued=True)
+                jobs.append(job.id)
+            except (ApiError, ValueError) as e:
+                skipped.append(f"{account}/{st['name']}: {e}")
+        self.audit(client, "action", op="update_all", account=only or "*", jobs=jobs, skipped=skipped)
+        if not jobs and not skipped:
+            raise ApiError("nothing to update; run an update check first")
+        return {"jobs": jobs, "skipped": skipped}
+
+    def _recreate_steps(self, acc, st):
+        unit = st["unit"]
+        if not unit:
+            return lambda: []
+        pm = ["podman", "pod"] if st["kind"] == "pod" else ["podman"]
+        sc = acc.systemctl_argv
+        if unit["active"] in ("active", "activating", "reloading"):
+            return lambda: [(sc("restart", unit["name"]), None)]
+        return lambda: [(pm + ["stop", "--ignore", st["name"]], None), (pm + ["rm", "-f", "--ignore", st["name"]], None),
+                        (sc("start", unit["name"]), None)]
 
     def _update_steps(self, acc, st, body, op, recreate_via_unit):
         scripts = st["scripts"]
