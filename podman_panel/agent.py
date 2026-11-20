@@ -220,8 +220,10 @@ class Panel:
         title = f"{acc.name}/{name}: {str(op).replace('_', ' ')}"
 
         def generate():
+            # By ID: a pod often contains a container of the same name, and podman resolves a name to the
+            # container first, which would produce only container-<name>.service.
             return [(["mkdir", "-p", acc.unit_dir], None),
-                    (["podman", "generate", "systemd", "--new", "--files", "--name", name], acc.unit_dir),
+                    (["podman", "generate", "systemd", "--new", "--files", "--name", st["id"]], acc.unit_dir),
                     (sc("daemon-reload"), None)]
 
         def recreate_via_unit():

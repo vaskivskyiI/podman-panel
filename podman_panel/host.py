@@ -292,10 +292,10 @@ def snapshot(acc):
         ctrs = by_pod.get(p["Name"], [])
         unit = unit_view(f"pod-{p['Name']}.service") or unit_view(
             next((c["unit"] for c in ctrs if c["infra"] and c["unit"]), None))
-        snap["stacks"].append(_stack("pod", p["Name"], p.get("Status"), ctrs, unit, scripts, id_by_name))
+        snap["stacks"].append(_stack("pod", p["Name"], p["Id"][:12], p.get("Status"), ctrs, unit, scripts, id_by_name))
     for c in by_pod.get(None, []):
         unit = unit_view(c["unit"]) or unit_view(f"container-{c['name']}.service")
-        snap["stacks"].append(_stack("container", c["name"], c["state"], [c], unit, scripts, id_by_name))
+        snap["stacks"].append(_stack("container", c["name"], c["id"], c["state"], [c], unit, scripts, id_by_name))
 
     # Units on disk whose pod/container no longer exists.
     present = {s["unit"]["name"] for s in snap["stacks"] if s["unit"]}
@@ -308,7 +308,7 @@ def snapshot(acc):
     return snap
 
 
-def _stack(kind, name, status, ctrs, unit, scripts, id_by_name):
+def _stack(kind, name, ident, status, ctrs, unit, scripts, id_by_name):
     members = [c for c in ctrs if not c["infra"]]
     running = sum(c["state"] == "running" for c in members)
     own = [s for s in scripts if name in s["pods"]]
@@ -316,7 +316,7 @@ def _stack(kind, name, status, ctrs, unit, scripts, id_by_name):
     rollback = sorted({c["image"] for c in members
                        if id_by_name.get(rollback_ref(c["image"])) not in (None, c["image_id"])})
     return {
-        "key": f"{kind}:{name}", "kind": kind, "name": name, "status": status,
+        "key": f"{kind}:{name}", "kind": kind, "name": name, "id": ident, "status": status,
         "containers": members, "running": running, "total": len(members),
         "unit": unit,
         "autostart": bool(unit and unit["file_state"] in ("enabled", "generated", "static")),
