@@ -15,6 +15,16 @@ A web UI for the podman pods and containers of every user on one server. Python 
     commit newer than the image, mean an update.
   - **Update** runs your launcher script with `update` (`~/podman/<x>.sh` or `~/<project>/deploy/*.sh`,
     matched by `POD_NAME=`/`POD=`); without one it pulls and recreates through the systemd unit.
+- **Update all.** Queues every stack the last check found outdated: one at a time per account, each as
+  its own job, so one failure does not stop the rest.
+- **Scripts and systemd.** When a stack has a unit, running its launcher script stops the unit first, then
+  regenerates the unit from the pod the script created and starts the pod through it. Without this,
+  systemd sees the script's `pod rm` as a crash and recreates the pod at once (the script's
+  `pod create` then fails with "name is in use"), or the new pod runs outside systemd. If the script
+  fails, the previous unit is started again.
+- **New stack.** A form (Stacks tab) that writes `~/podman/<name>.sh` in the standard layout below, with
+  secrets in `~/podman/<name>.env` (mode 600). Preview first; optionally start it at once. Only for
+  non-root users, and only from validated fields (image, ports, volumes, environment, secrets, devices).
 - **Rollback.** Before every update the images that run now are tagged `<image>:<tag>-pp-rollback`.
   "Roll back to previous image" puts that tag back and recreates the stack through its unit.
 - **Images.** Prune dangling or all unused images per account.
@@ -45,6 +55,35 @@ Both parts are systemd services on the host:
   privileges, sees a read-only system, no home directories, no devices and no other processes, cannot
   read the config or audit log, and is limited to a filtered set of system calls, 256 MB and 64 tasks.
   It holds no secrets and can do nothing without a session the agent issued.
+
+## Stack scripts
+
+The standard layout keeps scripts short and makes systemd the owner of every running stack. A script
+sets `POD` and `IMAGES`, defines `create()`, optionally `build()` for custom images, and sources the shared
+[`stacklib.sh`](stacklib.sh) (installed to `/opt/podman-panel/stacklib.sh`):
+
+```bash
+#!/usr/bin/env bash
+POD=myapp
+IMAGES=(docker.io/library/postgres:17 ghcr.io/example/myapp:2.3)
+
+create() {
+  podman pod create --name "$POD" -p 127.0.0.1:8080:8080
+  podman run -d --pod "$POD" --name myapp-db --env-file "$ENV_FILE" \
+    -v "$HOME/podman_data/myapp/db:/var/lib/postgresql/data:Z" docker.io/library/postgres:17
+  podman run -d --pod "$POD" --name myapp-web --env-file "$ENV_FILE" ghcr.io/example/myapp:2.3
+}
+
+source /opt/podman-panel/stacklib.sh
+stack_main "$@"        # up | update | down | status
+```
+
+- `up` creates the pod, regenerates `pod-<POD>.service` from it, and starts it through systemd (enabled).
+- `update` pulls `IMAGES`, runs `build()` if defined, then does `up`.
+- `down` stops and disables it; volumes and data stay.
+- Secrets live in `<script>.env` (mode 600), passed with `--env-file "$ENV_FILE"`, never in the script.
+- `set -euo pipefail` is on, so a failed step stops the script instead of continuing with a broken stack.
+- No `--restart` flags needed: the unit restarts the stack.
 
 ## Security
 

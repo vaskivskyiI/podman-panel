@@ -9,6 +9,7 @@ import concurrent.futures
 import http.server
 import json
 import os
+import shlex
 import pwd
 import socket
 import socketserver
@@ -18,7 +19,7 @@ import threading
 import time
 import urllib.parse
 
-from . import host, insights, registry
+from . import host, insights, registry, stackgen
 from .auth import Auth, AuthError
 from .jobs import JobManager
 
@@ -173,6 +174,8 @@ class Panel:
         if not isinstance(body, dict):
             raise ApiError("bad request")
         op = body.get("op")
+        if op == "create_stack":
+            return self._create_stack(body, client)
         if op == "update_all":
             return self._update_all(body, client)
         if op == "self_update":
@@ -269,6 +272,42 @@ class Panel:
             raise ApiError("unknown op")
         return self._job(acc, title, key, steps)
 
+    def stack_spec(self, body):
+        """Validate a new-stack request; returns (account, normalised spec, script text, env text)."""
+        acc = self.account(body.get("account"))
+        if acc.rootful:
+            # A stack defined from the browser and run as root could bind-mount the host: root for any session.
+            raise ApiError("new stacks can only be created for non-root users")
+        try:
+            spec = stackgen.validate(body.get("spec"), acc.home)
+        except stackgen.SpecError as e:
+            raise ApiError(str(e))
+        snap = next(s for s in self.snapshots(force=True) if s["account"] == acc.name)
+        names = {s["name"] for s in snap["stacks"]} | {c["name"] for s in snap["stacks"] for c in s["containers"]}
+        clash = ({spec["name"]} | {c["name"] for c in spec["containers"]}) & names
+        if clash:
+            raise ApiError(f"already in use by {acc.name}: {', '.join(sorted(clash))}")
+        if not os.path.exists("/opt/podman-panel/stacklib.sh") and self.is_root:
+            raise ApiError("/opt/podman-panel/stacklib.sh is missing; rerun install.sh")
+        script, env = stackgen.render(spec)
+        return acc, spec, script, env
+
+    def _create_stack(self, body, client):
+        acc, spec, script, env = self.stack_spec(body)
+        for path in (spec["script"], spec["env_file"]):
+            if os.path.lexists(path):
+                raise ApiError(f"{path} already exists")
+        host.write_new_file(acc, spec["env_file"], env, "600")
+        host.write_new_file(acc, spec["script"], script, "700")
+        self.audit(client, "create_stack", account=acc.name, stack=spec["name"], script=spec["script"],
+                   images=[c["image"] for c in spec["containers"]])
+        self.invalidate()
+        if not body.get("start"):
+            return {"job": None, "script": spec["script"]}
+        res = self._job(acc, f"{acc.name}/{spec['name']}: create", f"pod:{spec['name']}",
+                        [(["bash", spec["script"], "update"], os.path.dirname(spec["script"]))])
+        return {**res, "script": spec["script"]}
+
     def _update_all(self, body, client):
         """Every stack the last update check found outdated, queued one at a time per account
         (builds and pulls in parallel would fight over disk and CPU). Each stack is its own job, so
@@ -315,11 +354,11 @@ class Panel:
             sc = next((s for s in scripts if s["path"] == path), None)
             if not sc or arg not in ("", "update"):
                 raise ApiError("unknown script or argument")
-            return [(["bash", sc["path"]] + ([arg] if arg else []), os.path.dirname(sc["path"]))]
+            return self._script_steps(acc, st, sc, arg)
         keep = self._keep_steps(st)
         sc = next((s for s in scripts if s["update_arg"]), None)
         if sc:
-            return keep + [(["bash", sc["path"], "update"], os.path.dirname(sc["path"]))]
+            return keep + self._script_steps(acc, st, sc, "update")
         if st["custom_images"]:
             raise ApiError("custom image without a launcher script: rebuild it manually")
         if not st["unit"]:
@@ -327,6 +366,36 @@ class Panel:
                            "panel can recreate it from the unit")
         pulls = [(["podman", "pull", ref], None) for ref in sorted({c["image"] for c in st["containers"]})]
         return keep + pulls + recreate_via_unit()
+
+    @staticmethod
+    def _script_steps(acc, st, script, arg):
+        """Run a launcher script so that systemd and the script do not fight over the stack.
+
+        An older script removes and recreates the pod itself. If the stack has a unit, systemd sees that as
+        a crash and recreates the pod at once (then the script's 'pod create' fails), or the new pod runs
+        outside systemd. So: stop the unit, run the script, regenerate the unit from the pod the script
+        made, and hand the pod back to systemd. Scripts on stacklib.sh do all of this themselves."""
+        run = [(["bash", script["path"]] + ([arg] if arg else []), os.path.dirname(script["path"]))]
+        unit = st["unit"]
+        if script.get("stacklib") or not unit or (unit.get("path") or "").startswith("/run/"):
+            return run  # no unit, or a generated (Quadlet) unit that cannot be regenerated from the pod
+        sc = acc.systemctl_argv
+        kind = "pod" if st["kind"] == "pod" else "container"
+        # By ID at run time: the script creates a new pod, and a container may share the pod's name.
+        regenerate = ('set -e; id=$(podman %s inspect --format "{{.Id}}" -- "$1"); cd "$2"; '
+                      'podman generate systemd --new --files --name "$id" >/dev/null; echo "regenerated units in $2"'
+                      % kind)
+        pm = ["podman", "pod"] if kind == "pod" else ["podman"]
+        # If the script fails, bring the stack back through its previous unit rather than leaving it down.
+        guarded = 'bash "$1" ${2:+"$2"} || { rc=$?; echo "script failed (exit $rc): starting the previous unit"; ' \
+                  + shlex.join(pm + ["rm", "-f", "--ignore", st["name"]]) + " >/dev/null 2>&1; " \
+                  + shlex.join(sc("start", unit["name"])) + '; exit "$rc"; }'
+        run = [(["sh", "-c", guarded, "sh", script["path"], arg], os.path.dirname(script["path"]))]
+        return ([(sc("stop", unit["name"]), None)] + run +
+                [(["mkdir", "-p", acc.unit_dir], None),
+                 (["sh", "-c", regenerate, "sh", st["name"], acc.unit_dir], None),
+                 (pm + ["stop", "--ignore", st["name"]], None), (pm + ["rm", "-f", "--ignore", st["name"]], None),
+                 (sc("daemon-reload"), None), (sc("start", unit["name"]), None)])
 
     @staticmethod
     def _keep_steps(st):
@@ -511,6 +580,10 @@ def make_handler(panel):
             if method == "POST":
                 if path == "/action":
                     return self._send(200, panel.action(self._body(), client))
+                if path == "/stack-preview":
+                    _, spec, script, env = panel.stack_spec(self._body())
+                    return self._send(200, {"script": script, "path": spec["script"], "env_file": spec["env_file"],
+                                            "secret_keys": [k for c in spec["containers"] for k in c["secrets"]]})
                 if path == "/check-updates":
                     panel.check_updates()
                     return self._send(200, {"ok": True})

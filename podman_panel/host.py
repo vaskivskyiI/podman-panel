@@ -59,9 +59,9 @@ class Account:
             return list(argv)
         return ["runuser", "-u", self.name, "--"] + list(argv)
 
-    def run(self, argv, timeout=60, cwd=None):
+    def run(self, argv, timeout=60, cwd=None, input=None):
         try:
-            return subprocess.run(self.argv(argv), env=self.env(), cwd=cwd or self.home,
+            return subprocess.run(self.argv(argv), env=self.env(), cwd=cwd or self.home, input=input,
                                   capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired as e:
             raise CommandError(f"timed out after {timeout}s: {' '.join(argv)}") from e
@@ -149,7 +149,9 @@ def find_scripts(acc):
             if seg not in ("podman", "podman_data") and is_source_dir(d):
                 dirs.add(d)
         scripts.append({"path": p, "pods": pods, "sources": sorted(dirs),
-                        "update_arg": bool(re.search(r'\bupdate\b', text))})
+                        "update_arg": bool(re.search(r'\bupdate\b', text)),
+                        # Standard layout: the script hands the stack to systemd itself.
+                        "stacklib": "stacklib.sh" in text and "stack_main" in text})
     return scripts
 
 
@@ -350,3 +352,12 @@ def host_info():
             "mem_total": mem.get("MemTotal", 0), "mem_available": mem.get("MemAvailable", 0),
             "load": load, "cpus": os.cpu_count(), "uptime": uptime, "time": time.time(),
             "podman": shutil.which("podman") is not None}
+
+
+def write_new_file(acc, path, text, mode="600"):
+    """Create a file as the account itself (never as root in a user's home, which could follow a planted
+    symlink), refusing to overwrite anything that exists."""
+    r = acc.run(["sh", "-c", 'umask 077 && mkdir -p -- "$(dirname -- "$1")" && set -C && cat > "$1" && chmod "$2" -- "$1"',
+                 "sh", path, mode], input=text, timeout=20)
+    if r.returncode != 0:
+        raise CommandError((r.stderr or "").strip() or f"cannot create {path}")

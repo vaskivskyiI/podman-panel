@@ -120,3 +120,10 @@ pre.out { background: #0f0f13; color: #d8d8e0; padding: 12px; border-radius: 8px
   .insight { grid-template-columns: 1fr; }
   .meters { order: 3; flex-basis: 100%; }
 }
+
+.ns .form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 10px 14px; margin: 8px 0; }
+.ns label { display: flex; flex-direction: column; gap: 4px; font-size: 13px; }
+.ns input, .ns select, .ns textarea { font: inherit; padding: 6px 8px; border: 1px solid var(--line, #ccc); border-radius: 6px; background: transparent; color: inherit; }
+.ns textarea { font-family: ui-monospace, monospace; font-size: 12px; resize: vertical; }
+.ns fieldset { border: 1px solid var(--line, #ccc); border-radius: 8px; margin: 10px 0; padding: 6px 12px; }
+.ns legend { font-weight: 600; padding: 0 4px; }

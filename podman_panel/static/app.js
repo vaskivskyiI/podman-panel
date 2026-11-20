@@ -13,7 +13,24 @@ const ago = (t) => {
 };
 
 let S = null;            // last /api/state
-let tab = localGet("tab") || "overview";
+const TABS = ["overview", "stacks", "updates", "insights", "images", "jobs"];
+let tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : localGet("tab") || "overview";
+
+// Browser history: every tab has its own #address and an open dialog is one history step, so Back
+// closes the dialog first, then returns to the previous tab.
+function setTab(name) {
+  if (name === tab) return render();
+  tab = name; localSet("tab", tab);
+  history.pushState({ tab }, "", "#" + tab);
+  render();
+}
+history.replaceState({ tab }, "", "#" + tab);
+window.addEventListener("popstate", (e) => {
+  const d = $("#modal");
+  if (d.open) { d.close(); if (!(e.state && e.state.modal)) return; }
+  const t = (e.state && e.state.tab) || location.hash.slice(1);
+  if (TABS.includes(t) && t !== tab) { tab = t; localSet("tab", tab); if (S) render(); }
+});
 let filter = { account: "", q: "", only: "" };
 let stats = {};          // account -> {container name -> stats}
 let pollTimer = null;
@@ -173,6 +190,7 @@ function stacksView() {
     <input id="f-q" placeholder="Search name or image" value="${esc(filter.q)}" aria-label="Search">
     <span class="spacer"></span>
     <button class="btn" data-act="load-stats">Load CPU / memory</button>
+    <button class="btn primary" data-act="new-stack">New stack</button>
   </div>`;
   if (!list.length) return tb + `<div class="empty">No stacks match.</div>`;
   return tb + list.map(stackCard).join("");
@@ -291,7 +309,7 @@ function imagesView() {
 
 function jobsView() {
   let html = !S.jobs.length ? `<div class="empty">No jobs yet. Actions like update, restart and prune run here.</div>` :
-    `<div class="card" style="padding:0"><div class="table-wrap"><table><thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr></thead><tbody>` +
+    `<div class="card"><div class="table-wrap"><table><thead><tr><th>Job</th><th>Status</th><th>Started</th><th>Duration</th><th></th></tr></thead><tbody>` +
     S.jobs.map((j) => `<tr><td>${esc(j.title)}</td><td>${jobPill(j.status)}</td><td>${ago(j.started)}</td><td>${j.ended ? Math.round(j.ended - j.started) + " s" : "…"}</td>
       <td style="text-align:right"><button class="btn sm" data-act="job" data-job="${j.id}">Output</button></td></tr>`).join("") + `</tbody></table></div></div>`;
   html += `<h3>Activity log</h3><div class="toolbar"><span class="muted small">Every sign-in, failed sign-in and change, from the server's audit log.</span><span class="spacer"></span>
@@ -302,7 +320,7 @@ async function showAudit() {
   try {
     const r = await api("audit");
     const what = (e) => e.event === "action" ? `${String(e.op).replace(/_/g, " ")} ${e.account}${e.stack ? "/" + e.stack.split(":")[1] : ""}${e.unit ? " " + e.unit : ""}${e.arg ? " " + e.arg : ""}` : e.event.replace(/_/g, " ") + (e.reason ? ": " + e.reason : "");
-    $("#audit").innerHTML = `<div class="card" style="padding:0"><div class="table-wrap"><table><thead><tr><th>When</th><th>What</th><th>From</th></tr></thead><tbody>` +
+    $("#audit").innerHTML = `<div class="card"><div class="table-wrap"><table><thead><tr><th>When</th><th>What</th><th>From</th></tr></thead><tbody>` +
       (r.entries.map((e) => `<tr><td title="${esc(new Date(e.time * 1000).toLocaleString())}">${ago(e.time)}</td><td>${e.event === "login_failed" ? pill("bad", "failed") + " " : ""}${esc(what(e))}</td><td class="mono small">${esc(e.client)}</td></tr>`).join("") || `<tr><td colspan="3" class="muted">Empty</td></tr>`) +
       `</tbody></table></div></div>`;
   } catch (err) { toast(err.message, true); }
@@ -314,10 +332,16 @@ function modal(title, html) {
   $("#modal-title").textContent = title;
   $("#modal-body").innerHTML = html;
   const d = $("#modal");
-  if (!d.open) d.showModal();
+  if (!d.open) {
+    d.showModal();
+    history.pushState({ tab, modal: true }, "", "#" + tab);
+  }
 }
 $("#modal-close").addEventListener("click", () => $("#modal").close());
-$("#modal").addEventListener("close", () => { openJob = null; clearInterval(logTimer); });
+$("#modal").addEventListener("close", () => {
+  openJob = null; clearInterval(logTimer);
+  if (history.state && history.state.modal) history.back();  // closed by ✕ or Esc: drop its history step
+});
 
 async function showJob(id) {
   openJob = id;
@@ -371,12 +395,12 @@ document.addEventListener("click", async (e) => {
   const t = e.target.closest("[data-act], .tabs button");
   document.querySelectorAll(".menu-list").forEach((m) => { if (!t || !m.parentElement.contains(t) || t.dataset.act !== "menu") m.classList.add("hidden"); });
   if (!t) return;
-  if (t.matches(".tabs button")) { tab = t.dataset.tab; localSet("tab", tab); render(); return; }
+  if (t.matches(".tabs button")) { setTab(t.dataset.tab); return; }
   const d = t.dataset;
   switch (d.act) {
     case "menu": t.nextElementSibling.classList.toggle("hidden"); break;
     case "op": runOp(d); break;
-    case "goto-account": filter.account = d.account; tab = "stacks"; render(); break;
+    case "goto-account": filter.account = d.account; setTab("stacks"); break;
     case "job": showJob(+d.job); break;
     case "cancel-job": api(`jobs/${d.job}/cancel`, {}).catch((err) => toast(err.message, true)); break;
     case "logs": showLogs(d.account, d.container); break;
@@ -387,7 +411,7 @@ document.addEventListener("click", async (e) => {
         const r = await api("action", { op: "update_all" });
         toast(`Queued ${r.jobs.length} updates` + (r.skipped.length ? `, skipped ${r.skipped.length}` : ""), !!r.skipped.length);
         if (r.skipped.length) modal("Skipped", `<pre class="out">${esc(r.skipped.join("\n"))}</pre>`);
-        tab = "jobs"; localSet("tab", tab); refresh(true);
+        setTab("jobs"); refresh(true);
       } catch (err) { toast(err.message, true); }
       break;
     }
@@ -401,6 +425,11 @@ document.addEventListener("click", async (e) => {
     }
     case "inspect": showInspect(d.account, d.container); break;
     case "load-stats": loadStats(t); break;
+    case "new-stack": newStackForm(); break;
+    case "add-ctr": $("#ns-ctrs").insertAdjacentHTML("beforeend", ctrFields($("#ns-ctrs").children.length)); break;
+    case "ns-preview": stackSubmit("preview"); break;
+    case "ns-create": stackSubmit("create", false); break;
+    case "ns-create-start": stackSubmit("create", true); break;
   }
 });
 document.addEventListener("change", (e) => {
@@ -456,6 +485,73 @@ function showLogs(account, container) {
   });
   $("#log-out").scrollTop = 0;
   load().then(() => { const o = $("#log-out"); if (o) o.scrollTop = o.scrollHeight; });
+}
+
+// ---------- new stack
+const ctrFields = (i) => `<fieldset class="ctr" data-i="${i}"><legend>Container ${i + 1}</legend>
+  <div class="form-grid">
+    <label>Name<input name="name" placeholder="myapp-web" required></label>
+    <label>Image<input name="image" placeholder="docker.io/library/nginx:1.27" required></label>
+    <label>Volumes <span class="muted small">one per line: /host/path:/in/container[:ro,Z,U] or volume-name:/path</span><textarea name="volumes" rows="2"></textarea></label>
+    <label>Environment <span class="muted small">KEY=value, in the script</span><textarea name="env" rows="2"></textarea></label>
+    <label>Secrets <span class="muted small">KEY=value, stored only in the .env file (mode 600)</span><textarea name="secrets" rows="2"></textarea></label>
+    <label>Devices <span class="muted small">/dev/… per line</span><textarea name="devices" rows="1"></textarea></label>
+  </div></fieldset>`;
+
+function newStackForm() {
+  const users = S.accounts.filter((a) => !a.rootful).map((a) => a.account);
+  modal("New stack", `<form id="ns" class="ns">
+    <p class="muted small">Writes <code>~/podman/&lt;name&gt;.sh</code> in the standard layout (shared <code>stacklib.sh</code>): the stack is created, handed to systemd and starts on boot. Secrets go to <code>&lt;name&gt;.env</code>, never into the script.</p>
+    <div class="form-grid">
+      <label>User<select name="account">${users.map((u) => `<option>${esc(u)}</option>`).join("")}</select></label>
+      <label>Pod name<input id="ns-name" placeholder="myapp" required></label>
+      <label>Publish ports on<input name="bind" value="127.0.0.1"></label>
+      <label>Ports <span class="muted small">host:container[/udp], one per line</span><textarea name="ports" rows="2" placeholder="8080:80"></textarea></label>
+    </div>
+    <div id="ns-ctrs">${ctrFields(0)}</div>
+    <div class="toolbar"><button type="button" class="btn sm" data-act="add-ctr">Add container</button><span class="spacer"></span>
+      <button type="button" class="btn" data-act="ns-preview">Preview script</button>
+      <button type="button" class="btn" data-act="ns-create">Create script</button>
+      <button type="button" class="btn primary" data-act="ns-create-start">Create and start</button></div>
+    <p id="ns-err" class="err" role="alert"></p><pre class="out hidden" id="ns-out"></pre></form>`);
+}
+
+function stackBody() {
+  const f = $("#ns");
+  const lines = (el) => el.value.split("\n").map((l) => l.trim()).filter(Boolean);
+  const kv = (el) => Object.fromEntries(lines(el).map((l) => { const i = l.indexOf("="); if (i < 1) throw new Error(`"${l}" is not KEY=value`); return [l.slice(0, i), l.slice(i + 1)]; }));
+  const ports = lines(f.ports).map((l) => {
+    const m = l.match(/^(\d+):(\d+)(?:\/(tcp|udp))?$/);
+    if (!m) throw new Error(`port "${l}" is not host:container[/udp]`);
+    return { host: +m[1], container: +m[2], proto: m[3] || "tcp" };
+  });
+  const containers = [...f.querySelectorAll("fieldset.ctr")].map((fs) => {
+    const g = (n) => fs.querySelector(`[name=${n}]`);
+    return {
+      name: g("name").value.trim(), image: g("image").value.trim(), env: kv(g("env")), secrets: kv(g("secrets")), devices: lines(g("devices")),
+      volumes: lines(g("volumes")).map((l) => { const [source, target, opts] = l.split(":"); return { source, target, options: opts ? opts.split(",") : [] }; }),
+    };
+  });
+  return { account: f.account.value, spec: { name: $("#ns-name").value.trim(), bind: f.bind.value.trim(), ports, containers } };
+}
+
+async function stackSubmit(mode, start) {
+  $("#ns-err").textContent = "";
+  let body;
+  try { body = stackBody(); } catch (e) { $("#ns-err").textContent = e.message; return; }
+  try {
+    if (mode === "preview") {
+      const r = await api("stack-preview", body);
+      const out = $("#ns-out");
+      out.classList.remove("hidden");
+      out.textContent = `# ${r.path}${r.secret_keys.length ? `\n# secrets in ${r.env_file}: ${r.secret_keys.join(", ")}` : ""}\n\n${r.script}`;
+      return;
+    }
+    if (!confirm(start ? `Create ${body.spec.name} for ${body.account} and start it now?` : `Write the script for ${body.spec.name} (not started)?`)) return;
+    const r = await api("action", { op: "create_stack", ...body, start });
+    toast("Created " + r.script);
+    if (r.job) showJob(r.job); else { $("#modal").close(); refresh(true); }
+  } catch (e) { $("#ns-err").textContent = e.message; }
 }
 
 async function showInspect(account, container) {
