@@ -19,12 +19,13 @@ import threading
 import time
 import urllib.parse
 
-from . import host, insights, registry, stackgen
+from . import backups, host, insights, registry, stackgen
 from .auth import Auth, AuthError
 from .jobs import JobManager
 
 SNAP_TTL = 5
 UPDATE_INTERVAL = 6 * 3600
+BACKUP_INTERVAL = 600
 DEFAULTS = {
     "socket": "/run/podman-panel/agent.sock",
     "web_user": "podman-panel",
@@ -60,6 +61,8 @@ class Panel:
         self.updates = {}  # account -> {"checked": ts, "images": {ref: {...}}, "sources": {path: {...}}}
         self.panel_source = None  # git state of the panel's own checkout, from the last update check
         self.update_state = {"running": False, "started": None, "finished": None}
+        self.backups = None  # backups.status(), refreshed in the background (Kopia can take seconds)
+        self.backup_lock = threading.Lock()
         self.pool = concurrent.futures.ThreadPoolExecutor(max_workers=8)
         self.audit_lock = threading.Lock()
 
@@ -168,12 +171,38 @@ class Panel:
             self.check_updates()
             time.sleep(UPDATE_INTERVAL)
 
+    # -- backups (read-only)
+    def refresh_backups(self):
+        if self.is_root:
+            threading.Thread(target=self._refresh_backups, daemon=True).start()
+
+    def _refresh_backups(self):
+        if not self.backup_lock.acquire(blocking=False):
+            return
+        try:
+            res = backups.status({a.name: a.home for a in self.accounts.values()})
+            res["checked"] = time.time()
+            self.backups = res
+        except Exception as e:  # never let a Kopia surprise stop the loop
+            self.backups = {"installed": True, "connected": False, "error": str(e)[:300], "checked": time.time(),
+                            "sources": [], "uncovered": [], "timer": None}
+        finally:
+            self.backup_lock.release()
+
+    def backup_loop(self):
+        while True:
+            self._refresh_backups()
+            time.sleep(BACKUP_INTERVAL)
+
     # -- state
     def state(self, force=False):
         snaps = self.snapshots(force)
+        if force:
+            self.refresh_backups()
         h = host.host_info()
         return {"host": h, "accounts": snaps, "updates": self.updates, "update_state": self.update_state,
-                "insights": insights.build(h, snaps, self.updates, self.is_root),
+                "insights": insights.build(h, snaps, self.updates, self.is_root, self.backups),
+                "backups": self.backups,
                 "jobs": self.jobs.list()[:30], "is_root": self.is_root,
                 "panel": {"source_dir": self.config["source_dir"], "source": self.panel_source}}
 
@@ -663,5 +692,7 @@ def serve(config):
         os.chown(path, 0, gid)
     os.chmod(path, 0o660)
     threading.Thread(target=panel.update_loop, daemon=True).start()
+    if panel.is_root:
+        threading.Thread(target=panel.backup_loop, daemon=True).start()
     print(f"podman-panel agent on {path}  managing: {', '.join(panel.accounts)}", flush=True)
     srv.serve_forever()

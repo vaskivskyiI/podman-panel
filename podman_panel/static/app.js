@@ -13,7 +13,7 @@ const ago = (t) => {
 };
 
 let S = null;            // last /api/state
-const TABS = ["overview", "stacks", "updates", "insights", "images", "jobs"];
+const TABS = ["overview", "stacks", "updates", "insights", "images", "backups", "jobs"];
 let tab = TABS.includes(location.hash.slice(1)) ? location.hash.slice(1) : localGet("tab") || "overview";
 
 // Browser history: every tab has its own #address and an open dialog is one history step, so Back
@@ -128,10 +128,11 @@ function render() {
   ub.disabled = S.update_state.running;
   ub.textContent = S.update_state.running ? "Checking…" : "Check updates";
   ub.title = "Last check: " + ago(S.update_state.finished);
+  $("#tab-backups").classList.toggle("hidden", !S.backups?.installed);
   document.querySelectorAll(".tabs button").forEach((b) => b.classList.toggle("active", b.dataset.tab === tab));
   const keepScroll = window.scrollY;
   const searching = document.activeElement?.id === "f-q";
-  $("#view").innerHTML = ({ overview, stacks: stacksView, updates: updatesView, insights: insightsView, images: imagesView, jobs: jobsView })[tab]();
+  $("#view").innerHTML = ({ overview, stacks: stacksView, updates: updatesView, insights: insightsView, images: imagesView, backups: backupsView, jobs: jobsView })[tab]();
   window.scrollTo(0, keepScroll);
   const q = $("#f-q");
   if (q && searching) { q.focus(); q.setSelectionRange(q.value.length, q.value.length); }
@@ -305,6 +306,34 @@ function imagesView() {
       <div class="card"><div class="table-wrap"><table><thead><tr><th>Image</th><th>ID</th><th>Size</th><th>Created</th><th>In use</th></tr></thead><tbody>${imgs.slice(0, 200).map((i) =>
         `<tr><td class="img">${i.names.length ? i.names.map(esc).join("<br>") : '<span class="muted">&lt;none&gt;</span>'}</td><td class="mono">${esc(i.id)}</td><td>${fmtBytes(i.size)}</td><td>${ago(i.created)}</td><td>${i.containers ? pill("ok", i.containers + "") : pill("off", "no")}</td></tr>`).join("")}</tbody></table></div></div>`;
   }).join("");
+}
+
+const when = (t) => t ? new Date(t * 1000).toLocaleString() : "–";
+function backupsView() {
+  const b = S.backups;
+  if (!b?.installed) return `<div class="empty">Kopia is not installed. See backup/README.md in the panel's source.</div>`;
+  const t = b.timer;
+  const timerPill = !t ? pill("warn", "no timer") : t.running ? pill("info", "running") :
+    t.last_exit && t.result !== "success" ? pill("bad", "last run " + t.result) : t.enabled ? pill("ok", "scheduled") : pill("warn", "timer inactive");
+  let html = `<div class="card" style="display:flex;gap:12px;align-items:center;flex-wrap:wrap">
+    ${b.connected ? pill("ok", "connected") : pill("bad", "not connected")}
+    ${b.storage ? `<span>Storage: <b>${esc(b.storage)}</b></span>` : ""}
+    ${b.connected && !b.actions ? pill("warn", "actions disabled: no LVM snapshots") : ""}
+    ${timerPill}
+    ${t ? `<span class="muted small">last run ${ago(t.last_run)} · next ${when(t.next_run)}</span>` : ""}
+    <span class="spacer" style="flex:1"></span><span class="muted small">checked ${ago(b.checked)}</span></div>`;
+  if (b.error) html += `<div class="card"><span class="err">${esc(b.error)}</span></div>`;
+  if (b.uncovered?.length) html += `<h3>Not backed up</h3><div class="card">${b.uncovered.map((u) => `<div><code>${esc(u.path)}</code></div>`).join("")}
+    <div class="muted small" style="margin-top:6px">The daily run only includes folders backed up before. Run <code>sudo kopia snapshot create &lt;path&gt;</code> once for each.</div></div>`;
+  if (!b.sources?.length) return html + (b.connected ? `<div class="empty">No snapshots in this repository yet.</div>` : "");
+  return html + `<h3>Sources</h3><div class="card"><div class="table-wrap"><table><thead><tr><th>Source</th><th>Last snapshot</th><th>Size</th><th>Files</th><th>Snapshots</th><th></th></tr></thead><tbody>` +
+    b.sources.map((s) => {
+      const l = s.latest, age = l.start ? Date.now() / 1000 - l.start : Infinity;
+      return `<tr><td><code>${esc(s.path)}</code><div class="muted small">${esc(s.user)}@${esc(s.host)}</div></td>
+        <td title="${esc(when(l.start))}">${ago(l.start)}</td><td>${fmtBytes(l.size)}</td><td>${esc(l.files)}</td>
+        <td>${esc(s.count)} <span class="muted small">since ${esc(when(s.first).split(",")[0])}</span></td>
+        <td>${l.errors ? pill("bad", l.errors + " errors") : l.incomplete ? pill("warn", "incomplete") : age > 129600 ? pill("warn", "old") : pill("ok", "ok")}</td></tr>`;
+    }).join("") + `</tbody></table></div></div>`;
 }
 
 function jobsView() {

@@ -13,9 +13,10 @@ def _i(severity, account, title, detail, action=None, stack=None):
             "action": action, "stack": stack}
 
 
-def build(host, snaps, updates, is_root):
+def build(host, snaps, updates, is_root, backups=None):
     out = []
     now = time.time()
+    out += _backup_insights(backups, now)
     used = host["disk_used"] / host["disk_total"] if host["disk_total"] else 0
     if used > 0.85:
         out.append(_i("warn", None, f"Root filesystem is {used:.0%} full",
@@ -158,4 +159,42 @@ def build(host, snaps, updates, is_root):
 
     order = {"warn": 0, "update": 1, "info": 2, "tip": 3}
     out.sort(key=lambda x: (order[x["severity"]], x["account"] or "", x["title"]))
+    return out
+
+
+def _backup_insights(b, now):
+    """Kopia backups (backup/README.md). None: not read yet, or the agent is not root."""
+    if not b:
+        return []
+    if not b.get("installed"):
+        return [_i("tip", None, "No backups configured",
+                   "Kopia is not installed. backup/README.md sets up encrypted daily backups of every stack's "
+                   "folders, taken from an LVM snapshot so live databases are copied consistently.")]
+    if not b.get("connected"):
+        return [_i("warn", None, "Kopia is not connected to a repository", b.get("error") or "")]
+    out = []
+    if b.get("error"):
+        out.append(_i("warn", None, "Cannot list backups", b["error"]))
+    t = b.get("timer")
+    if not t:
+        out.append(_i("info", None, "No daily backup timer",
+                      "kopia-backup.timer is not installed, so backups only run by hand (backup/README.md)."))
+    elif not t["running"] and t.get("last_exit") and t.get("result") not in ("success", None):
+        out.append(_i("warn", None, "Last backup run failed",
+                      f"kopia-backup.service: {t['result']} (exit status {t.get('exit_status')}). "
+                      "See journalctl -u kopia-backup.service."))
+    elif not t.get("enabled"):
+        out.append(_i("warn", None, "Backup timer is not active", "systemctl enable --now kopia-backup.timer"))
+    for src in b.get("sources", []):
+        last = src["latest"]
+        if last["start"] and now - last["start"] > 1.5 * DAY:
+            out.append(_i("warn", None, f"Backup of {src['path']} is {(now - last['start']) / DAY:.0f} days old",
+                          f"{src['user']}@{src['host']}. Check the timer and journalctl -u kopia-backup.service."))
+        if last["errors"]:
+            out.append(_i("warn", None, f"Last backup of {src['path']} skipped {last['errors']} files",
+                          "Files that could not be read. kopia snapshot list shows the details."))
+    for u in b.get("uncovered", []):
+        out.append(_i("warn", u["account"], f"{u['path']} is not backed up",
+                      "The daily run backs up only folders that were backed up before. Back it up once: "
+                      f"sudo kopia snapshot create {u['path']} (and set its policy, backup/README.md step 3)."))
     return out

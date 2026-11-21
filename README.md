@@ -88,6 +88,7 @@ stack_main "$@"        # up | update | down | status
     unnamed volumes (they live in podman's storage, outside backups, and `--rm` deletes unnamed ones).
   - `~/podman_logs/<stack>/<container>/`: log files written by apps, if they write any; otherwise logs go
     to the journal (`podman logs`).
+  Backups: [backup/README.md](backup/README.md) (Kopia, encrypted, from LVM snapshots).
 - `set -euo pipefail` is on, so a failed step stops the script instead of continuing with a broken stack.
 - No `--restart` flags needed: the unit restarts the stack.
 
