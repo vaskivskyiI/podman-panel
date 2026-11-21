@@ -128,36 +128,50 @@ class Panel:
         self.update_state.update(running=True, started=time.time())
         threading.Thread(target=self._check_updates, daemon=True).start()
 
+    def _check_account(self, s):
+        """Registry and git status of one account's snapshot."""
+        acc = self.accounts[s["account"]]
+        digests = {im["id"]: {d.split("@", 1)[-1] for d in im["digests"]} for im in s["images"]}
+        todo, images = {}, {}
+        for st in s["stacks"]:
+            for c in st["containers"]:
+                ref = c["image"]
+                if not ref or ref in images or ref in todo:
+                    continue
+                parsed = registry.parse_ref(ref)
+                if ref.startswith("localhost/"):
+                    images[ref] = {"status": "custom"}
+                elif not parsed:
+                    images[ref] = {"status": "pinned"}
+                else:
+                    todo[ref] = (parsed, digests.get(c["image_id"], set()))
+
+        def lookup(item):
+            ref, (parsed, local) = item
+            try:
+                return ref, registry.check(*parsed, local)
+            except Exception as e:  # network/registry errors are reported per image
+                return ref, {"status": "unknown", "error": str(e)[:200]}
+
+        images.update(self.pool.map(lookup, todo.items()))
+        dirs = {d for st in s["stacks"] for d in st["sources"]}
+        sources = dict(zip(dirs, self.pool.map(lambda d: host.source_status(acc, d, True), dirs)))
+        return {"checked": time.time(), "images": images, "sources": sources}
+
+    def _image_job_done(self, job):
+        """After a job that pulls, builds or retags images, re-check that account, so an update does not
+        keep being offered until the next scheduled check."""
+        self.invalidate()
+        if job.status == "succeeded" and job.account in self.updates:
+            def recheck():
+                acc = self.accounts[job.account]
+                self.updates[job.account] = self._check_account(host.snapshot(acc))
+            threading.Thread(target=recheck, daemon=True).start()
+
     def _check_updates(self):
         try:
             for s in self.snapshots(force=True):
-                acc = self.accounts[s["account"]]
-                digests = {im["id"]: {d.split("@", 1)[-1] for d in im["digests"]} for im in s["images"]}
-                todo, images = {}, {}
-                for st in s["stacks"]:
-                    for c in st["containers"]:
-                        ref = c["image"]
-                        if not ref or ref in images or ref in todo:
-                            continue
-                        parsed = registry.parse_ref(ref)
-                        if ref.startswith("localhost/"):
-                            images[ref] = {"status": "custom"}
-                        elif not parsed:
-                            images[ref] = {"status": "pinned"}
-                        else:
-                            todo[ref] = (parsed, digests.get(c["image_id"], set()))
-
-                def lookup(item):
-                    ref, (parsed, local) = item
-                    try:
-                        return ref, registry.check(*parsed, local)
-                    except Exception as e:  # network/registry errors are reported per image
-                        return ref, {"status": "unknown", "error": str(e)[:200]}
-
-                images.update(self.pool.map(lookup, todo.items()))
-                dirs = {d for st in s["stacks"] for d in st["sources"]}
-                sources = dict(zip(dirs, self.pool.map(lambda d: host.source_status(acc, d, True), dirs)))
-                self.updates[s["account"]] = {"checked": time.time(), "images": images, "sources": sources}
+                self.updates[s["account"]] = self._check_account(s)
             src = self.config["source_dir"]
             if os.path.isdir(os.path.join(src, ".git")):
                 me = host.Account(pwd.getpwuid(os.geteuid()).pw_name)
@@ -277,7 +291,10 @@ class Panel:
         if op == "start":
             steps = [(sc("start", unit_name), None)] if unit_name else [(pm + ["start", name], None)]
         elif op == "stop":
-            steps = [(sc("stop", unit_name), None)] if unit_active else [(pm + ["stop", name], None)]
+            # reset-failed: podman's pod cleanup can exit with an error ("slice not loaded") after a clean
+            # stop, which would leave the unit shown as failed instead of stopped.
+            steps = ([(sc("stop", unit_name), None), (sc("reset-failed", unit_name), None)] if unit_active
+                     else [(pm + ["stop", name], None)])
         elif op == "restart":
             steps = [(sc("restart", unit_name), None)] if unit_active else [(pm + ["restart", name], None)]
         elif op == "adopt":
@@ -311,7 +328,7 @@ class Panel:
             steps = self._update_steps(acc, st, body, op, recreate_via_unit)
         else:
             raise ApiError("unknown op")
-        return self._job(acc, title, key, steps)
+        return self._job(acc, title, key, steps, images_change=op in ("update", "run_script", "rollback"))
 
     def stack_spec(self, body):
         """Validate a new-stack request; returns (account, normalised spec, script text, env text)."""
@@ -346,7 +363,7 @@ class Panel:
         if not body.get("start"):
             return {"job": None, "script": spec["script"]}
         res = self._job(acc, f"{acc.name}/{spec['name']}: create", f"pod:{spec['name']}",
-                        [(["bash", spec["script"], "update"], os.path.dirname(spec["script"]))])
+                        [(["bash", spec["script"], "update"], os.path.dirname(spec["script"]))], images_change=True)
         return {**res, "script": spec["script"]}
 
     def _update_all(self, body, client):
@@ -368,7 +385,7 @@ class Panel:
             try:
                 steps = self._update_steps(acc, st, {}, "update", self._recreate_steps(acc, st))
                 job = self.jobs.start(acc, f"{account}/{st['name']}: update", key, steps,
-                                      on_done=self.invalidate, queued=True)
+                                      on_done=self._image_job_done, queued=True)
                 jobs.append(job.id)
             except (ApiError, ValueError) as e:
                 skipped.append(f"{account}/{st['name']}: {e}")
@@ -508,9 +525,10 @@ class Panel:
                        "--working-directory", src, "/bin/bash", installer, "--upgrade"], src))
         return steps
 
-    def _job(self, acc, title, target, steps):
+    def _job(self, acc, title, target, steps, images_change=False):
         try:
-            job = self.jobs.start(acc, title, target, steps, on_done=self.invalidate)
+            job = self.jobs.start(acc, title, target, steps,
+                                  on_done=self._image_job_done if images_change else self.invalidate)
         except ValueError as e:
             raise ApiError(str(e), 409)
         return {"job": job.id}
