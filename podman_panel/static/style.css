@@ -98,7 +98,8 @@ tr:last-child td { border-bottom: 0; }
 .menu { position: relative; display: inline-block; }
 .menu-list { position: absolute; right: 0; top: calc(100% + 4px); background: var(--panel); border: 1px solid var(--border); border-radius: 10px; box-shadow: 0 8px 24px rgba(0,0,0,.15); padding: 4px; z-index: 10; min-width: 220px; }
 .menu-list button { display: block; width: 100%; text-align: left; background: none; border: 0; padding: 7px 10px; border-radius: 6px; cursor: pointer; }
-.menu-list button:hover { background: var(--panel2); }
+.menu-list button:hover:not(:disabled) { background: var(--panel2); }
+.menu-list button:disabled { opacity: .45; cursor: default; }
 .menu-list hr { border: 0; border-top: 1px solid var(--border); margin: 4px 0; }
 
 dialog { border: 1px solid var(--border); border-radius: 12px; padding: 0; width: min(1100px, calc(100vw - 32px)); max-height: calc(100vh - 48px); background: var(--panel); color: var(--text); }

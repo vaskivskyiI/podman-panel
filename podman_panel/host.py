@@ -196,6 +196,19 @@ def unit_states(acc, units):
     return states
 
 
+CONTAINER_DISABLED = """# Written by Podman Panel: this container does not start with its pod.
+# Delete this file (or switch "Start with pod" on in the panel) to undo.
+[Unit]
+ConditionPathExists=/podman-panel/container-disabled-by-panel
+"""
+
+
+def container_disabled_path(acc, unit):
+    """Drop-in that keeps one container of a pod from starting with it. It lives next to the unit, so
+    regenerating the unit (stack script, panel) keeps it."""
+    return os.path.join(acc.unit_dir, unit + ".d", "panel-disabled.conf")
+
+
 def wanted_units(path):
     """Units listed in Wants=/Requires= of a generated pod unit (its container units)."""
     try:
@@ -275,8 +288,16 @@ def snapshot(acc):
             "has_healthcheck": bool(cfg.get("Healthcheck")),
             "restart_policy": (hc.get("RestartPolicy") or {}).get("Name") or None,
             "privileged": bool(hc.get("Privileged")), "network_mode": hc.get("NetworkMode"),
-            "ports": ports, "restarts": c.get("Restarts", 0),
+            "ports": ports, "restarts": c.get("Restarts", 0), "placeholder": False, "with_pod": None,
         }
+
+    def stopped_view(name, unit):
+        """A pod's container whose unit is stopped: the unit ran it with --rm, so podman no longer lists it."""
+        return {"id": "", "name": name, "image": None, "image_id": "", "image_created": None, "state": "stopped",
+                "status": "stopped (systemd)", "infra": False, "pod": None, "started": None, "exited_at": None,
+                "created": None, "unit": unit, "autoupdate": None, "health": None, "has_healthcheck": False,
+                "restart_policy": None, "privileged": False, "network_mode": None, "ports": [], "restarts": 0,
+                "placeholder": True}
 
     def unit_view(name):
         if not name:
@@ -294,6 +315,12 @@ def snapshot(acc):
         ctrs = by_pod.get(p["Name"], [])
         unit = unit_view(f"pod-{p['Name']}.service") or unit_view(
             next((c["unit"] for c in ctrs if c["infra"] and c["unit"]), None))
+        if unit and unit.get("path") and os.path.dirname(unit["path"]) == acc.unit_dir:
+            listed = {c["unit"] for c in ctrs}
+            ctrs = ctrs + [stopped_view(u[len("container-"):-len(".service")], u)
+                           for u in wanted_units(unit["path"]) if u not in listed]
+        for c in ctrs:
+            c["with_pod"] = None if not c["unit"] else not os.path.exists(container_disabled_path(acc, c["unit"]))
         snap["stacks"].append(_stack("pod", p["Name"], p["Id"][:12], p.get("Status"), ctrs, unit, scripts, id_by_name))
     for c in by_pod.get(None, []):
         unit = unit_view(c["unit"]) or unit_view(f"container-{c['name']}.service")

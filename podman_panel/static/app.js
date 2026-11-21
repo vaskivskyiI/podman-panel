@@ -211,12 +211,23 @@ function stackCard(st) {
     const ports = c.ports.map((p) => `${p.host_ip && p.host_ip !== "0.0.0.0" ? p.host_ip + ":" : ""}${p.host}→${p.ctr}`).join(", ");
     const health = c.health ? pill(c.health === "healthy" ? "ok" : c.health === "unhealthy" ? "bad" : "warn", c.health) : "";
     const imgU = ((S.updates[st.account] || {}).images || {})[c.image];
-    return `<tr><td><b>${esc(c.name)}</b><div class="img">${esc(c.image)}${imgU && imgU.status === "outdated" ? " · <span style='color:var(--info)'>newer digest</span>" : ""}</div></td>
-      <td>${pill(c.state === "running" ? "ok" : "off", c.state)} ${health}<div class="muted small">${esc(c.status)}</div></td>
+    const running = c.state === "running";
+    const ck = `${k} data-container="${esc(c.name)}"`;
+    // Per-container controls only make sense inside a pod; a standalone container is its own stack.
+    const ctrMenu = st.kind !== "pod" ? "" : `<div class="menu"><button class="btn sm" data-act="menu" aria-haspopup="true" aria-label="Container actions">⋯</button>
+      <div class="menu-list hidden">
+        ${running ? `<button data-act="op" data-op="ctr_restart" ${ck}>Restart container</button><button data-act="op" data-op="ctr_stop" ${ck}>Stop container</button>`
+                  : `<button data-act="op" data-op="ctr_start" ${ck} ${c.with_pod === false ? "disabled title='Start with pod is off'" : ""}>Start container</button>`}
+        ${c.with_pod === true ? `<button data-act="op" data-op="ctr_with_pod_off" ${ck}>Don't start with the pod</button>` : ""}
+        ${c.with_pod === false ? `<button data-act="op" data-op="ctr_with_pod_on" ${ck}>Start with the pod</button>` : ""}
+        ${!running && !c.unit ? `<hr><button class="danger" data-act="op" data-op="ctr_remove" ${ck}>Remove container</button>` : ""}
+      </div></div>`;
+    return `<tr><td><b>${esc(c.name)}</b><div class="img">${c.placeholder ? '<span class="muted">not running: its unit recreates it on start</span>' : esc(c.image)}${imgU && imgU.status === "outdated" ? " · <span style='color:var(--info)'>newer digest</span>" : ""}</div></td>
+      <td>${pill(running ? "ok" : "off", c.state)} ${health} ${c.with_pod === false ? pill("warn", "won't start with pod") : ""}<div class="muted small">${esc(c.status)}</div></td>
       <td class="mono">${esc(ports) || '<span class="muted">—</span>'}</td>
       <td class="mono small">${s ? esc(s.cpu) + "<br>" + esc(s.mem) : '<span class="muted">—</span>'}</td>
-      <td style="text-align:right;white-space:nowrap"><button class="btn sm" data-act="logs" data-account="${esc(st.account)}" data-container="${esc(c.name)}">Logs</button>
-      <button class="btn sm" data-act="inspect" data-account="${esc(st.account)}" data-container="${esc(c.name)}">Details</button></td></tr>`;
+      <td style="text-align:right;white-space:nowrap">${c.placeholder ? "" : `<button class="btn sm" data-act="logs" data-account="${esc(st.account)}" data-container="${esc(c.name)}">Logs</button>
+      <button class="btn sm" data-act="inspect" data-account="${esc(st.account)}" data-container="${esc(c.name)}">Details</button>`} ${ctrMenu}</td></tr>`;
   }).join("");
   return `<section class="stack">
     <div class="stack-head">
@@ -404,15 +415,19 @@ const CONFIRM = {
   remove_orphan_unit: "Disable and delete {unit} and its container units?",
   regenerate_unit: "Rewrite the systemd unit files of {name} from its current definition?",
   enable_linger: "Enable lingering for {account}?",
+  ctr_stop: "Stop container {container} in {name}? The rest of the pod keeps running.",
+  ctr_restart: "Restart container {container} in {name}?",
+  ctr_with_pod_off: "Stop starting {container} together with {name}? It keeps running now; from the next pod start (or reboot) it stays off until you switch it back on.",
+  ctr_remove: "Remove the stopped container {container} from {name}?",
   rollback: "Roll {name} back to the image it ran before the last update ({images})? It is recreated through its systemd unit.",
   self_update: "Update the panel? It pulls its source, reinstalls and restarts. You will need to sign in again.",
 };
 async function runOp(d) {
   const body = { op: d.op, account: d.account };
-  for (const k of ["stack", "unit", "script", "arg"]) if (d[k] !== undefined) body[k] = d[k];
+  for (const k of ["stack", "container", "unit", "script", "arg"]) if (d[k] !== undefined) body[k] = d[k];
   const name = (d.stack || "").split(":")[1] || "";
   const msg = CONFIRM[d.op];
-  if (msg && !confirm(msg.replace("{name}", name).replace("{account}", d.account).replace("{unit}", d.unit || "").replace("{script}", d.script || "").replace("{arg}", d.arg || "").replace("{images}", d.images || ""))) return;
+  if (msg && !confirm(msg.replace("{name}", name).replace("{account}", d.account).replace("{unit}", d.unit || "").replace("{script}", d.script || "").replace("{arg}", d.arg || "").replace("{images}", d.images || "").replace("{container}", d.container || ""))) return;
   try {
     const r = await api("action", body);
     toast("Started: " + d.op.replace(/_/g, " ") + (name ? " " + name : ""));
@@ -427,7 +442,20 @@ document.addEventListener("click", async (e) => {
   if (t.matches(".tabs button")) { setTab(t.dataset.tab); return; }
   const d = t.dataset;
   switch (d.act) {
-    case "menu": t.nextElementSibling.classList.toggle("hidden"); break;
+    case "menu": {
+      // Fixed to the window, so a scrolling table (container rows) cannot clip it; opens upward near the bottom.
+      const list = t.nextElementSibling;
+      list.classList.toggle("hidden");
+      if (!list.classList.contains("hidden")) {
+        const r = t.getBoundingClientRect();
+        list.style.position = "fixed";
+        list.style.right = `${Math.max(8, window.innerWidth - r.right)}px`;
+        const below = window.innerHeight - r.bottom > list.offsetHeight + 12;
+        list.style.top = below ? `${r.bottom + 4}px` : "";
+        list.style.bottom = below ? "" : `${window.innerHeight - r.top + 4}px`;
+      }
+      break;
+    }
     case "op": runOp(d); break;
     case "goto-account": filter.account = d.account; setTab("stacks"); break;
     case "job": showJob(+d.job); break;
@@ -623,3 +651,6 @@ $("#btn-updates").addEventListener("click", async () => {
 $("#btn-logout").addEventListener("click", async () => { await api("logout", {}).catch(() => {}); showLogin(); });
 
 api("state").then((s) => { S = s; start(); }).catch(() => {});
+
+// Menus are fixed to the window while open: close them when anything scrolls.
+window.addEventListener("scroll", () => document.querySelectorAll(".menu-list").forEach((m) => m.classList.add("hidden")), { passive: true, capture: true });

@@ -223,7 +223,7 @@ class Panel:
         acc = self.account(body.get("account"))
         result = self._action(op, acc, body)
         self.audit(client, "action", op=op, account=acc.name,
-                   **{k: body[k] for k in ("stack", "unit", "script", "arg") if isinstance(body.get(k), str)},
+                   **{k: body[k] for k in ("stack", "container", "unit", "script", "arg") if isinstance(body.get(k), str)},
                    job=result["job"])
         return result
 
@@ -254,6 +254,10 @@ class Panel:
         if not isinstance(key, str) or ":" not in key or not host.valid_name(key.split(":", 1)[1]):
             raise ApiError("bad stack")
         snap, st = self.stack(acc, key)
+        if isinstance(op, str) and op.startswith("ctr_"):
+            cname = body.get("container")
+            return self._job(acc, f"{acc.name}/{st['name']}/{cname}: {op[4:].replace('_', ' ')}",
+                             f"{key}/{cname}", self._container_steps(acc, st, cname, op))
         name, is_pod, unit = st["name"], st["kind"] == "pod", st["unit"]
         pm = ["podman", "pod"] if is_pod else ["podman"]
         unit_name = (unit or {}).get("name")
@@ -372,6 +376,44 @@ class Panel:
         if not jobs and not skipped:
             raise ApiError("nothing to update; run an update check first")
         return {"jobs": jobs, "skipped": skipped}
+
+    @staticmethod
+    def _container_steps(acc, st, cname, op):
+        """One container of a pod. A container with its own unit (generated with --new) is controlled
+        through systemd; stopping it removes it, and its unit brings it back on start."""
+        c = next((c for c in st["containers"] if c["name"] == cname), None) if host.valid_name(cname) else None
+        if not c or st["kind"] != "pod":
+            raise ApiError("unknown container in this pod")
+        sc = acc.systemctl_argv
+        unit = c["unit"] if c["unit"] and os.path.exists(os.path.join(acc.unit_dir, c["unit"])) else None
+        running = c["state"] == "running"
+        if op == "ctr_start":
+            if c["with_pod"] is False:
+                raise ApiError("it is set not to start with its pod: switch 'Start with pod' on first")
+            return [(sc("start", unit), None)] if unit else [(["podman", "start", cname], None)]
+        if op == "ctr_stop":
+            return [(sc("stop", unit), None)] if unit else [(["podman", "stop", cname], None)]
+        if op == "ctr_restart":
+            if unit:
+                return [(sc("restart", unit), None)]
+            return [(["podman", "restart", cname], None)]
+        if op in ("ctr_with_pod_off", "ctr_with_pod_on"):
+            if not unit:
+                raise ApiError("this container has no unit of its own: it always starts with the pod")
+            dropin = host.container_disabled_path(acc, unit)
+            if op == "ctr_with_pod_off":
+                write = ['sh', '-c', 'mkdir -p "$(dirname "$1")" && printf "%s" "$2" > "$1"', 'sh', dropin,
+                         host.CONTAINER_DISABLED]
+                return [(write, None), (sc("daemon-reload"), None)]
+            return [(["rm", "-f", "--", dropin], None), (sc("daemon-reload"), None)]
+        if op == "ctr_remove":
+            if running:
+                raise ApiError("stop it first")
+            if unit:
+                raise ApiError("its unit recreates it with the pod: switch 'Start with pod' off instead, and "
+                               "remove it from the stack's script to drop it for good")
+            return [rm_step(["podman"], cname)]
+        raise ApiError("unknown op")
 
     def _recreate_steps(self, acc, st):
         unit = st["unit"]
