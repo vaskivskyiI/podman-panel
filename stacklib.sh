@@ -18,6 +18,9 @@
 #
 # Secrets go in ENV_FILE (default: next to the script, <script>.env, mode 600), passed to containers
 # with --env-file "$ENV_FILE". Never put them in the script.
+#
+# Persistent data: bind mounts under ~/podman_data/<stack>/ (never named or unnamed volumes).
+# Log files written by apps: ~/podman_logs/<stack>/ (backed up separately, or not at all).
 
 set -euo pipefail
 

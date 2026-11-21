@@ -82,6 +82,12 @@ stack_main "$@"        # up | update | down | status
 - `update` pulls `IMAGES`, runs `build()` if defined, then does `up`.
 - `down` stops and disables it; volumes and data stay.
 - Secrets live in `<script>.env` (mode 600), passed with `--env-file "$ENV_FILE"`, never in the script.
+- Folders, one per stack, so backups can treat each kind differently:
+  - `~/podman/<stack>.sh` and `<stack>.env`: scripts and secrets.
+  - `~/podman_data/<stack>/<container>/`: everything that must survive. Bind mounts only; no named or
+    unnamed volumes (they live in podman's storage, outside backups, and `--rm` deletes unnamed ones).
+  - `~/podman_logs/<stack>/<container>/`: log files written by apps, if they write any; otherwise logs go
+    to the journal (`podman logs`).
 - `set -euo pipefail` is on, so a failed step stops the script instead of continuing with a broken stack.
 - No `--restart` flags needed: the unit restarts the stack.
 
