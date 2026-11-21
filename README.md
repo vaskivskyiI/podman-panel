@@ -82,6 +82,8 @@ stack_main "$@"        # up | update | down | status
 - `update` pulls `IMAGES`, runs `build()` if defined, then does `up`.
 - `down` stops and disables it; volumes and data stay.
 - Secrets live in `<script>.env` (mode 600), passed with `--env-file "$ENV_FILE"`, never in the script.
+- Give containers names that differ from the pod's (e.g. pod `syncthing`, container `syncthing-app`):
+  depending on the account's podman database, podman refuses a container named like a pod.
 - Folders, one per stack, so backups can treat each kind differently:
   - `~/podman/<stack>.sh` and `<stack>.env`: scripts and secrets.
   - `~/podman_data/<stack>/<container>/`: everything that must survive. Bind mounts only; no named or
