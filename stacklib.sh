@@ -1,6 +1,7 @@
 # Shared logic for stack launcher scripts (installed to /opt/podman-panel/stacklib.sh).
 #
-# A stack script sets POD and IMAGES, defines create() (podman pod create + podman run --pod "$POD" …),
+# A stack script sets POD and IMAGES, defines create() (podman pod create + podman run -d --pod "$POD" …,
+# with -d right after run: those containers are only created, see stack_create_only),
 # optionally build() for custom images, then ends with:
 #
 #   source /opt/podman-panel/stacklib.sh
@@ -62,12 +63,27 @@ stack_remove() {
   fi
 }
 
+# While create() runs, `podman run -d …` only creates the container: the unit is generated from it and
+# it is removed again, so starting it would be wasted, and a database killed mid-initialization by that
+# removal can be left damaged. Foreground runs (one-off init steps) still run.
+stack_create_only() {
+  podman() {
+    if [[ ${1:-} == run && ( ${2:-} == -d || ${2:-} == --detach ) ]]; then
+      shift 2; command podman create "$@"
+    else
+      command podman "$@"
+    fi
+  }
+  create
+  unset -f podman
+}
+
 stack_up() {
   stack_ensure_env
   "${SYSTEMCTL[@]}" stop "$UNIT" 2>/dev/null || true
   stack_remove
   say "create pod $POD"
-  create
+  stack_create_only
   # Generate the unit from what create() made (by pod ID: a container may share the pod's name),
   # then let systemd recreate and own it.
   local id
