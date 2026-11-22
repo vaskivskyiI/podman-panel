@@ -6,6 +6,8 @@ A web UI for the podman pods and containers of every user on one server. Python 
 
 - **Stacks.** Every pod and standalone container of root and of each lingering user: state, health,
   ports, CPU and memory, details (environment values hidden) and the systemd unit. Start, stop, restart.
+  A stack whose pod does not exist (stopped through its unit, or failing to start) stays listed from its unit,
+  with systemd's retry count and podman's last error.
 - **Logs.** Last 200 / 1000 / 5000 lines, live follow, line filter, download.
 - **Start on boot.** A toggle per stack. With no unit yet it runs `podman generate systemd --new` first.
 - **Updates.**
@@ -29,7 +31,7 @@ A web UI for the podman pods and containers of every user on one server. Python 
   "Roll back to previous image" puts that tag back and recreates the stack through its unit.
 - **Images.** Prune dangling or all unused images per account.
 - **Insights.** Disk pressure, stacks that won't start after reboot, stacks running outside their unit,
-  orphaned units, long-stopped stacks, databases published on all interfaces or on `:latest`, missing
+  stacks that fail to start, orphaned units (no pod, no script, disabled), long-stopped stacks, databases published on all interfaces or on `:latest`, missing
   healthchecks, `--privileged`, very old images, lingering off, Quadlet migration.
 - **Jobs and activity log.** Every change runs as a cancellable job with live output. Every sign-in,
   failed sign-in and change is written to `/var/log/podman-panel/audit.log` and shown in the UI.

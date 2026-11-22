@@ -59,10 +59,15 @@ class Account:
             return list(argv)
         return ["runuser", "-u", self.name, "--"] + list(argv)
 
+    # Commands run as the user get the usual umask, not the agent's 0077 (from its unit): otherwise
+    # files they write (git pull in a build checkout, files a script creates) become owner-only,
+    # and `podman build` copies them into images whose non-root user then cannot read them.
+    USER_UMASK = 0o022
+
     def run(self, argv, timeout=60, cwd=None, input=None):
         try:
             return subprocess.run(self.argv(argv), env=self.env(), cwd=cwd or self.home, input=input,
-                                  capture_output=True, text=True, timeout=timeout)
+                                  capture_output=True, text=True, timeout=timeout, umask=self.USER_UMASK)
         except subprocess.TimeoutExpired as e:
             raise CommandError(f"timed out after {timeout}s: {' '.join(argv)}") from e
         except OSError as e:
@@ -77,7 +82,8 @@ class Account:
     def popen(self, argv, cwd=None):
         return subprocess.Popen(self.argv(argv), env=self.env(), cwd=cwd or self.home,
                                 stdout=subprocess.PIPE, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
-                                text=True, errors="replace", bufsize=1, start_new_session=True)
+                                text=True, errors="replace", bufsize=1, start_new_session=True,
+                                umask=self.USER_UMASK)
 
     def podman_json(self, *args, timeout=60):
         out = self.check(["podman", *args, "--format", "json"], timeout)
@@ -184,7 +190,7 @@ def source_status(acc, d, fetch):
 def unit_states(acc, units):
     if not units:
         return {}
-    out = acc.systemctl("show", "-p", "Id,LoadState,ActiveState,SubState,UnitFileState,FragmentPath",
+    out = acc.systemctl("show", "-p", "Id,LoadState,ActiveState,SubState,UnitFileState,FragmentPath,NRestarts",
                         "--", *sorted(units))
     states = {}
     for block in out.strip().split("\n\n"):
@@ -192,8 +198,27 @@ def unit_states(acc, units):
         if kv.get("Id"):
             states[kv["Id"]] = {
                 "load": kv.get("LoadState"), "active": kv.get("ActiveState"), "sub": kv.get("SubState"),
-                "file_state": kv.get("UnitFileState") or None, "path": kv.get("FragmentPath") or None}
+                "file_state": kv.get("UnitFileState") or None, "path": kv.get("FragmentPath") or None,
+                "restarts": int(kv.get("NRestarts") or 0)}
     return states
+
+
+def unit_failing(unit):
+    """A unit that failed, or that systemd keeps restarting after failures."""
+    return bool(unit) and (unit["active"] == "failed" or unit["sub"] == "auto-restart")
+
+
+def unit_last_error(acc, name):
+    """The last error line podman logged for a unit (why it fails), or None."""
+    argv = ["journalctl", "--no-pager", "-o", "cat", "-n", "60", "-u", name]
+    if not acc.rootful:
+        argv.insert(1, "--user")
+    try:
+        r = acc.run(argv, timeout=15)
+    except CommandError:
+        return None
+    lines = [l.strip() for l in (r.stdout or "").splitlines() if l.strip().startswith("Error:")]
+    return lines[-1][:500] if lines else None
 
 
 CONTAINER_DISABLED = """# Written by Podman Panel: this container does not start with its pod.
@@ -237,7 +262,19 @@ def snapshot(acc):
         return snap
 
     ids = [c["Id"] for c in containers]
-    details = {d["Id"]: d for d in acc.podman_json("container", "inspect", *ids)} if ids else {}
+    details = {}
+    if ids:
+        # A container can vanish between ps and inspect (a pod that fails to start is removed within a second).
+        # podman then still prints the others and exits 125; skip the vanished ones instead of failing the account.
+        r = acc.run(["podman", "container", "inspect", *ids, "--format", "json"])
+        try:
+            details = {d["Id"]: d for d in (json.loads(r.stdout) if r.stdout.strip() else [])}
+        except ValueError:
+            details = {}
+        if r.returncode != 0 and not details:
+            snap["error"] = (r.stderr or "").strip() or f"podman inspect: exit code {r.returncode}"
+            return snap
+        containers = [c for c in containers if c["Id"] in details]
 
     unit_files = sorted(os.path.basename(p) for p in
                         glob.glob(os.path.join(acc.unit_dir, "pod-*.service")) +
@@ -326,13 +363,31 @@ def snapshot(acc):
         unit = unit_view(c["unit"]) or unit_view(f"container-{c['name']}.service")
         snap["stacks"].append(_stack("container", c["name"], c["id"], c["state"], [c], unit, scripts, id_by_name))
 
-    # Units on disk whose pod/container no longer exists.
+    # Pod units on disk whose pod does not exist. A unit made with --new removes its pod when it stops, and a
+    # pod that fails to start is removed again at once: these are stacks that are stopped or failing, and
+    # must stay visible. Only a unit with no script that is disabled and inactive is a leftover (orphan).
     present = {s["unit"]["name"] for s in snap["stacks"] if s["unit"]}
     live = {f"pod-{s['name']}.service" for s in snap["stacks"]} | {
         f"container-{c['name']}.service" for s in snap["stacks"] for c in s["containers"]}
-    snap["orphan_units"] = [
-        {"name": u, **states.get(u, {})} for u in unit_files
-        if u.startswith("pod-") and u not in present and u not in live]
+    snap["orphan_units"] = []
+    for u in unit_files:
+        if not u.startswith("pod-") or u in present or u in live:
+            continue
+        name, unit = u[len("pod-"):-len(".service")], unit_view(u)
+        st = states.get(u, {})
+        if not unit or not (any(name in s["pods"] for s in scripts) or st.get("file_state") == "enabled"
+                            or st.get("active") != "inactive"):
+            snap["orphan_units"].append({"name": u, **st})
+            continue
+        if unit_failing(unit):
+            unit["error"] = unit_last_error(acc, u)
+        status = ("failing, retrying" if unit["sub"] == "auto-restart" else "failed" if unit["active"] == "failed"
+                  else "starting" if unit["active"] == "activating" else "stopped")
+        ctrs = [stopped_view(c[len("container-"):-len(".service")], c) for c in wanted_units(unit["path"])] \
+            if unit.get("path") and os.path.dirname(unit["path"]) == acc.unit_dir else []
+        for c in ctrs:
+            c["with_pod"] = not os.path.exists(container_disabled_path(acc, c["unit"]))
+        snap["stacks"].append(_stack("pod", name, "", status, ctrs, unit, scripts, id_by_name))
     snap["stacks"].sort(key=lambda s: (s["kind"] != "pod", s["name"]))
     return snap
 

@@ -1,7 +1,7 @@
 """Improvement suggestions derived from snapshots, update checks and host state."""
 import time
 
-from .host import ROLLBACK_SUFFIX
+from .host import ROLLBACK_SUFFIX, unit_failing
 
 DB_PORTS = {5432: "PostgreSQL", 3306: "MySQL/MariaDB", 6379: "Redis", 27017: "MongoDB", 11211: "Memcached"}
 DAY = 86400
@@ -86,6 +86,14 @@ def build(host, snaps, updates, is_root, backups=None):
                               "by a script, so systemd neither supervises nor restarts it. Restarting through "
                               "systemd recreates it from the unit (short downtime).",
                               {"op": "adopt", "account": a, "stack": key}, key))
+
+            if unit_failing(unit):
+                again = f"systemd retries every 10 s ({unit.get('restarts', 0)} restarts so far)" \
+                    if unit["sub"] == "auto-restart" else "systemd gave up"
+                out.append(_i("warn", a, f"{name} fails to start",
+                              f"{unit['name']} keeps failing; {again}. "
+                              + (f"Last error: {unit['error']}" if unit.get("error") else
+                                 f"See journalctl {'' if s['rootful'] else '--user '}-u {unit['name']}."), None, key))
 
             if not running and st["status"] in ("Exited", "Created", "exited", "created", "Stopped"):
                 last = max([c.get("exited_at") or 0 for c in st["containers"]] +
